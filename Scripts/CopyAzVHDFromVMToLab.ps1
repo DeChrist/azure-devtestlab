@@ -2,35 +2,35 @@
 Param(
     # Enter the subscription ID. It is assumed that both source VM and destination lab are both in
     # this subscription.
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $false)]
     [string]
-    $SubscriptionId = '<SubscriptionId>',
+    $SubscriptionId = '095fe58b-9d09-4c71-ac8a-bb2917647356',
 
     # Enter the name of the Lab where you want to copy the VHD file.
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $false)]
     [string]
-    $LabName = '<LabName>',
+    $LabName = 'dtl_logfas_dev_vm_static',
     
     # Enter the resource group name of the Lab where you want to copy the VHD file.
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $false)]
     [string]
-    $LabResourceGroupName = '<LabResourceGroupName>',
+    $LabResourceGroupName = 'rg_logfas_infra',
     
-    # Enter the name of the VM. The VHD file associated with the VM will be copied to the Lab.
-    [Parameter(Mandatory)]
+    # Enter the name of the Disk. The VHD file associated with the VM will be copied to the Lab.
+    [Parameter(Mandatory = $false)]
     [string]
-    $VMName = '<VMName>',
+    $DiskName = 'lgfdvvmbuild02_OsDisk',
 
     # Enter the name of the VM resource group. The VHD file associated with the VM in this resource group will be copied to the Lab.
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $false)]
     [string]
-    $VMResourceGroupName = '<VMResourceGroupName>',
+    $DiskResourceGroupName = 'rg_logfas_migration',
 
     # Enter the name of the VHD file with extension as .vhd. You will identify the file with this
     # name while creating template.
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $false)]
     [string]
-    $VHDFileName = '<VHDFileName>.vhd',
+    $VHDFileName = 'lgf-build-srv.vhd',
 
     # Enter the seconds after the Shared Access Signature on source will expired. Default value is 3600.
     [Parameter(Mandatory = $false)]
@@ -112,6 +112,25 @@ function Get-AzDtlVirtualMachine
     return $vm
 }
 
+function Get-AzDtlDisk
+{
+    [CmdletBinding()]
+    param(
+        [string]
+        $Name,
+        [string]
+        $ResourceGroupName
+    )
+
+    $disk = Get-AzDisk -Name "$Name" -ResourceGroupName "$ResourceGroupName" | Select-Object -First 1
+    if (-not $disk)
+    {
+        throw "Unable to find disk with name '$Name' in resource group '$ResourceGroupName'."
+    }
+    
+    return $disk
+}
+
 function Get-AzDtlVirtualMachineCopyContext
 {
     [CmdletBinding()]
@@ -147,6 +166,40 @@ function Get-AzDtlVirtualMachineCopyContext
     }
         
     return $vmCopyContext
+}
+
+function Get-AzDtlDiskCopyContext
+{
+    [CmdletBinding()]
+    param(
+        $Disk,
+        $SignatureExpire
+    )
+
+    $diskCopyContext = @{
+        IsManaged = $false
+        SourceUri = ''
+        StorageAccountKey = ''
+        StorageAccountName = ''
+    }
+    
+    if ($null -eq $Disk.vhd)
+    {
+        $managedDiskUrl = Grant-AzDiskAccess -ResourceGroupName $Disk.ResourceGroupName -DiskName $Disk.Name -Access Read -DurationInSecond $SignatureExpire
+        $diskCopyContext.SourceUri = $managedDiskUrl.AccessSAS
+        $diskCopyContext.IsManaged = $true
+    }
+    else
+    {
+        Throw "Unmanaged disks are not supported"
+        $diskCopyContext.SourceUri = $Disk.vhd.uri
+        [System.Uri] $uri = $diskCopyContext.SourceUri
+        $diskCopyContext.StorageAccountName = $uri.Host.Split('.')[0]
+        $vmStorageAccount = Get-AzResource -Name $diskCopyContext.StorageAccountName -ResourceType 'Microsoft.Storage/storageAccounts'
+        $diskCopyContext.StorageAccountKey = (Get-AzStorageAccountKey -Name $diskCopyContext.StorageAccountName -ResourceGroupName $vmStorageAccount.ResourceGroupName)[0].Value
+    }
+        
+    return $diskCopyContext
 }
 
 function Stop-AzDtlVirtualMachine
@@ -225,22 +278,22 @@ try
     $labStorageAccountKey = (Get-AzStorageAccountKey -Name $labStorageAccountName -ResourceGroupName $LabResourceGroupName)[0].Value
     Write-Host $Done
 
-    Write-Host "Getting virtual machine '$VMName' ... " -NoNewline
-    $vm = Get-AzDtlVirtualMachine -Name "$VMName" -ResourceGroupName "$VMResourceGroupName"
+    Write-Host "Getting disk '$DiskName' ... " -NoNewline
+    $disk = Get-AzDtlDisk -Name "$DiskName" -ResourceGroupName "$DiskResourceGroupName"
     Write-Host $Done
 
-    Write-Host "Stopping source virtual machine '$VMName' ... " -NoNewline
-    Stop-AzDtlVirtualMachine -VM $vm
-    Write-Host $Done
+    # Write-Host "Stopping source virtual machine '$VMName' ... " -NoNewline
+    # Stop-AzDtlVirtualMachine -VM $vm
+    # Write-Host $Done
 
     Write-Host 'Preparing copy context ... ' -NoNewline
-    $vmCopyContext = Get-AzDtlVirtualMachineCopyContext -VM $vm -SignatureExpire $SignatureExpire
+    $diskCopyContext = Get-AzDtlDiskCopyContext -Disk $disk -SignatureExpire $SignatureExpire
     $copyContext = @{
         VHDFileName = $VHDFileName
-        VMSourceUri = $vmCopyContext.SourceUri
-        VMStorageAccountKey = $vmCopyContext.StorageAccountKey
-        VMStorageAccountName = $vmCopyContext.StorageAccountName
-        IsVMDiskManaged = $vmCopyContext.IsManaged
+        VMSourceUri = $diskCopyContext.SourceUri
+        VMStorageAccountKey = $diskCopyContext.StorageAccountKey
+        VMStorageAccountName = $diskCopyContext.StorageAccountName
+        IsVMDiskManaged = $diskCopyContext.IsManaged
         LabStorageAccountKey = $labStorageAccountKey
         LabStorageAccountName = $labStorageAccountName
         SignatureExpire = $SignatureExpire
